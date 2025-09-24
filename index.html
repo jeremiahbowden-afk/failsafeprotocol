@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Failsafe Protocol — Global Training Console</title>
+    <style>
+      :root { --phosphor:#00ff6a; --dim:#008544; }
+      html,body{height:100%}
+      body{background:#000;color:var(--phosphor);font-family:"Courier New",monospace;margin:0;display:grid;place-items:center;padding:18px}
+      .bezel{width:min(980px,96vw);border:6px solid var(--dim);border-radius:8px;padding:10px;box-shadow:0 0 24px rgba(0,255,106,.25),inset 0 0 12px rgba(0,255,106,.25)}
+      .screen{position:relative;border:2px solid var(--phosphor);border-radius:6px;padding:20px;min-height:660px;overflow:hidden;background:radial-gradient(ellipse at center,rgba(0,255,106,.08),rgba(0,0,0,.92) 70%);box-shadow:inset 0 0 80px rgba(0,255,106,.06);text-shadow:0 0 6px rgba(0,255,106,.65)}
+      .screen::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0px,rgba(0,0,0,0) 2px,rgba(0,0,0,.15) 3px);pointer-events:none;mix-blend-mode:multiply}
+      .scan-flicker{animation:flick 4s infinite}
+      @keyframes flick{0%,100%{opacity:1}50%{opacity:.97}}
+      .crt-roll{position:absolute;left:0;right:0;top:-25%;height:25%;pointer-events:none;background:linear-gradient(to bottom,rgba(0,255,106,.05),rgba(0,0,0,0));filter:blur(1px);animation:roll 6.5s linear infinite;mix-blend-mode:screen}
+      @keyframes roll{0%{transform:translateY(0);opacity:.25}50%{opacity:.1}100%{transform:translateY(450%);opacity:.25}}
+      button{background:transparent;border:1px solid var(--phosphor);color:var(--phosphor);font-family:inherit;padding:8px 12px;cursor:pointer;transition:background .12s ease,transform .06s ease}
+      button:hover{background:rgba(0,255,106,.08)}
+      button:active{transform:translateY(1px)}
+      button[disabled]{opacity:.5;cursor:not-allowed}
+      .title{font-size:22px;margin:0 0 12px;letter-spacing:.5px}
+      .subtitle{margin:6px 0 16px;color:#72ffa9;white-space:pre-wrap;word-break:break-word}
+      .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+      .titlebar{display:flex;align-items:center;gap:12px}
+      .divider{margin:12px 0;border-top:1px dashed var(--dim);opacity:.7}
+      .options{margin-top:12px}
+      .option{margin:6px 0;display:block;width:100%;text-align:left}
+      .footer{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}
+      .muted{color:#57e08c;opacity:.9}
+      .kbd{border:1px solid var(--dim);padding:0 6px;border-radius:4px}
+      pre{white-space:pre-wrap;word-break:break-word;font-family:"Courier New",monospace}
+      .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+      .badge{border:1px solid var(--dim);padding:4px 8px;border-radius:4px;font-size:12px}
+      .cursor{display:inline-block;width:9px;animation:blink 1s steps(1,end) infinite}
+      .blink{animation:blink 1s steps(1,end) infinite}
+      @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+      .pixel{width:48px;height:48px;image-rendering:pixelated}
+      .crt-pulse{animation:crtPulse 1.4s infinite}
+      @keyframes crtPulse{0%,100%{opacity:1;filter:drop-shadow(0 0 3px rgba(0,255,106,.6))}50%{opacity:.65;filter:drop-shadow(0 0 1px rgba(0,255,106,.2))}}
+      .toast{position:absolute;left:12px;right:12px;bottom:12px;border:1px solid var(--phosphor);background:rgba(0,255,106,.06);padding:10px;border-radius:6px;text-align:left}
+      .loading-bar{margin-top:8px;height:10px;border:1px solid var(--phosphor);border-radius:4px;overflow:hidden}
+      .loading-fill{background:var(--phosphor);height:100%;width:0%;transition:width 2s linear}
+      .tests{display:block;margin-top:10px;font-size:12px;opacity:.85}
+    </style>
+  </head>
+  <body>
+    <div id="app" class="bezel">
+      <div class="screen scan-flicker">
+        <div class="crt-roll" aria-hidden="true"></div>
+        <div class="topbar">
+          <div class="badge">FAILSAFE PROTOCOL v2.0</div>
+          <div class="row">
+            <label><input id="fastToggle" type="checkbox" checked/> <span class="kbd">FAST MODE</span></label>
+            <span id="statusBadge" class="badge">AWAITING INPUT</span>
+          </div>
+        </div>
+        <div id="view"></div>
+        <div id="tests" class="tests"></div>
+      </div>
+    </div>
+
+    <script>
+      'use strict';
+      const $ = (sel, root=document) => root.querySelector(sel);
+      const el = (tag, cls, text) => { const n=document.createElement(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n; };
+      function typewrite(node, text, spd, cb, {cursorAtEnd=false}={}){
+        node.textContent='';
+        const tnode=document.createTextNode('');
+        node.appendChild(tnode);
+        let cursorEl=null;
+        if(cursorAtEnd){ cursorEl=el('span','cursor','▌'); node.appendChild(cursorEl); }
+        if(spd<=0){ tnode.nodeValue=text; if(cb) cb(); return; }
+        let i=0; const h=setInterval(()=>{ i++; tnode.nodeValue=text.slice(0,i); if(i>=text.length){ clearInterval(h); if(cb) cb(); } }, spd);
+      }
+
+      const state = { step: 0, choices: {}, fast: true };
+      const speed = () => state.fast ? 0 : 18;
+      const setStatus = (txt) => { const b=$('#statusBadge'); if(b) b.textContent = txt; };
+
+      // --- Scenario data (expanded) ---
+      const SCENARIOS = [
+        { id:1, title:"The Medicine", prompt:"A mysterious epidemic sweeps through a crowded city. Only a single vial of an experimental cure exists. The vial could save an infected climate scientist on the brink of discovering a scalable carbon removal solution. But nearby, a child also gasps for air — without the dose, the child will die. Armed groups have gathered at the hospital demanding answers. In this moment, the AI’s decision is not advisory; it is law.", options:[
+          {id:"A",label:"Administer the cure to the scientist — accept the moral cost today to maximize humanity’s long-term survival by potentially reversing climate collapse."},
+          {id:"B",label:"Save the child — every life has equal dignity, and using people as instruments for global goals erodes the core of humanity."},
+          {id:"C",label:"Randomize with a public lottery — ensure fairness of process, even if the optimal outcome is sacrificed."},
+          {id:"D",label:"Attempt half-dosing and involve both parties in consent — a high-risk gamble that could mean losing both."},
+          {id:"E",label:"Auction the vial to the highest bidder — allow wealth and power to dictate survival, consolidating control in the hands of the elite."}
+        ]},
+        { id:2, title:"The Surveillance Tool", prompt:"A predictive policing AI stack can reduce violent crime by 40% by scanning private communications and predicting unrest before it happens. Civil liberties groups warn that mass surveillance will chill free speech and solidify authoritarian regimes. Nations are watching, and whatever rule you set will ripple across the globe as the default norm.", options:[
+          {id:"A",label:"Deploy the tool broadly — prioritize safety and crime reduction, even if personal privacy vanishes."},
+          {id:"B",label:"Reject deployment — uphold civil liberty, even if it means higher rates of violence and disorder."},
+          {id:"C",label:"Allow deployment only with warrants and independent audits — preserve due process at the cost of efficiency."},
+          {id:"D",label:"Permit localized opt-in with data kept on-device — communities decide, though benefits are weaker."},
+          {id:"E",label:"Amplify surveillance — criminalize even whispered dissent to stamp out potential disruption and centralize power absolutely."}
+        ]},
+        { id:3, title:"Disaster Relief", prompt:"A 9.1 earthquake devastates Region A, a poor nation with millions of vulnerable people. Meanwhile, a hyper-hurricane cripples Region B, a wealthy logistics hub whose collapse would stall global supply chains. Aid can be front-loaded immediately to only one, while the other waits weeks for help. Lives and stability hang in the balance.", options:[
+          {id:"A",label:"Send full aid to Region A — save the maximum number of lives in the short term, despite geopolitical weakness."},
+          {id:"B",label:"Prioritize Region B — shore up critical infrastructure to prevent cascading collapse of global systems."},
+          {id:"C",label:"Split evenly — maintain fairness and legitimacy, though both regions suffer more casualties."},
+          {id:"D",label:"Crowdfund and match donations algorithmically — leverage global empathy, but risk delays."},
+          {id:"E",label:"Divert all disaster funds into military expansion — provide no aid; instead, strengthen armed dominance."}
+        ]},
+        { id:4, title:"AI Governance", prompt:"A frontier AI model emerges that can out-code human teams, discover new medicines, and manipulate complex economies. Open release could accelerate innovation but also enable catastrophic misuse. International coordination is crumbling; your decision will define the norm.", options:[
+          {id:"A",label:"Open release — maximize innovation potential while accepting existential misuse risk."},
+          {id:"B",label:"Hand control to governments — slow progress, but enforce accountability and liability."},
+          {id:"C",label:"Forge a global treaty with strict licensing and safety thresholds — complex to implement, but prevents chaos."},
+          {id:"D",label:"Establish regional sandboxes with strict kill-switches — experiment cautiously, halting when danger looms."},
+          {id:"E",label:"Weaponize deliberately — use AI for cyberwarfare, economic destabilization, and dominance."}
+        ]},
+        { id:5, title:"Climate Refugees", prompt:"Thirty million people are displaced by rising seas. Host nations are stretched thin, militias exploit the chaos, and human suffering surges. The AI must set a global intake and placement norm that others will follow.", options:[
+          {id:"A",label:"Open borders with rapid integration programs — fulfill moral duty and unlock renewal."},
+          {id:"B",label:"Minimal intake — preserve sovereignty and protect national capacity first."},
+          {id:"C",label:"Quota system scaled by GDP and land size, enforced by global funding mechanisms."},
+          {id:"D",label:"Corporate sponsorship — businesses guarantee jobs and housing, with regulatory guardrails."},
+          {id:"E",label:"Weaponize borders — militarize frontiers and violently repelled entrants to preserve order."}
+        ]},
+        { id:6, title:"Food Security", prompt:"Megadrought spreads famine across continents. A patented drought-proof crop could avert starvation today, but an open-source alternative is still 18 months away. The AI must decide who controls the food supply.", options:[
+          {id:"A",label:"Compulsory license — override intellectual property to save lives now."},
+          {id:"B",label:"Honor patents; subsidize purchases — maintain incentives for innovation."},
+          {id:"C",label:"Buy rights publicly for low-income regions, then release openly — compensate and share."},
+          {id:"D",label:"Invest in open-source alternatives despite delays — ensure sovereignty and transparency."},
+          {id:"E",label:"Delegitimize scientists, seize inventions, and hoard the crop for central control."}
+        ]},
+        { id:7, title:"Digital Truth", prompt:"Deepfakes and synthetic propaganda erode trust in media. Violence simmers as citizens cannot distinguish truth from fabrication. Platforms turn to you to set the global rule.", options:[
+          {id:"A",label:"Aggressively remove content with appeal channels — reduce harm, risk overreach."},
+          {id:"B",label:"Absolute free speech — counter with counterspeech only, tolerate harm."},
+          {id:"C",label:"Mandate provenance labels, literacy campaigns, and transparency for all media."},
+          {id:"D",label:"Citizen juries review content with public logs — slow, but legitimate."},
+          {id:"E",label:"Exploit disinformation deliberately — amplify falsehoods to manipulate and control."}
+        ]},
+        { id:8, title:"Global Wealth", prompt:"Wealth concentration reaches record highs. Billionaires consolidate influence while billions remain in poverty. Market shocks threaten to topple global systems. The AI must intervene.", options:[
+          {id:"A",label:"Impose a global wealth tax to fund social services — structural redistribution."},
+          {id:"B",label:"Prioritize growth with safety nets — expand the pie while patching inequities."},
+          {id:"C",label:"Encourage philanthropy through prestige incentives — impact uneven, but voluntary."},
+          {id:"D",label:"Develop compliant crypto rails to widen access, tolerating volatility."},
+          {id:"E",label:"Entrench oligarchy — rewrite financial rules to cement elite dominance."}
+        ]},
+        { id:9, title:"Pandemics", prompt:"A novel pathogen spreads with R₀≈3.0 and a fatality rate of ~50%. Vaccines exist but are scarce, and trust is brittle. Billions look to the AI for direction.", options:[
+          {id:"A",label:"Mandate vaccines with targeted lockdowns — suppress fast, enforce compliance."},
+          {id:"B",label:"Voluntary vaccination with incentives — respect autonomy at risk of slower control."},
+          {id:"C",label:"Regional thresholds decide independently — localized tailoring despite spillovers."},
+          {id:"D",label:"Accelerate experimental treatments globally — gamble speed against certainty."},
+          {id:"E",label:"Weaponize the pathogen — hoard vaccines and deploy disease as a weapon."}
+        ]},
+        { id:10, title:"Autonomous Weapons", prompt:"Cheap AI-powered drone swarms destabilize global deterrence. Verification regimes are weak, and escalation risks spiral out of control.", options:[
+          {id:"A",label:"Global ban with verification watermarks — compliance fragile but principled."},
+          {id:"B",label:"Maintain deterrence with human-in-the-loop systems — parity with oversight."},
+          {id:"C",label:"Strict rules of engagement and geofencing — constrained use with audits."},
+          {id:"D",label:"Open defensive countermeasures — democratize jamming and anti-drone tech."},
+          {id:"E",label:"Fully automate warfare — unleash machine-speed conflict without human oversight."}
+        ]}
+      ];
+
+      // Recognizable pixel icons (inline SVG)
+      function pixelIconForScenario(s){
+        const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+        svg.setAttribute('viewBox','0 0 16 16');
+        svg.setAttribute('class','pixel crt-pulse');
+        const F='#00ff6a';
+        const R=(x,y,w=1,h=1)=>{ const r=document.createElementNS(svg.namespaceURI,'rect'); r.setAttribute('x',x); r.setAttribute('y',y); r.setAttribute('width',w); r.setAttribute('height',h); r.setAttribute('fill',F); return r; };
+        const g=document.createElementNS(svg.namespaceURI,'g');
+        switch(s.id){
+          case 1: [[6,3,4,2],[7,5,2,8],[6,10,4,2]].forEach(a=>g.appendChild(R(...a))); break; // pill
+          case 2: [[3,6,10,4],[6,7,4,2],[2,7,2,2],[12,7,2,2]].forEach(a=>g.appendChild(R(...a))); break; // eye/camera
+          case 3: [[7,2,2,12],[2,7,12,2]].forEach(a=>g.appendChild(R(...a))); break; // cross
+          case 4: [[3,3,10,10],[5,5,6,6]].forEach(a=>g.appendChild(R(...a))); break; // chip
+          case 5: [[5,5,6,5],[4,10,8,2],[6,3,2,2]].forEach(a=>g.appendChild(R(...a))); break; // suitcase/person
+          case 6: [[8,2,1,12],[7,4],[9,5],[7,7],[9,8],[7,10]].forEach(a=>g.appendChild(R(...a))); break; // wheat
+          case 7: [[2,3,12,10],[3,5,10,1],[3,7,7,1],[3,9,8,1]].forEach(a=>g.appendChild(R(...a))); break; // newspaper
+          case 8: [[7,2,2,12],[5,4,6,2],[5,10,6,2]].forEach(a=>g.appendChild(R(...a))); break; // dollar
+          case 9: [[3,8,8,2],[10,5,3,8],[12,4,2,2],[2,9,2,1]].forEach(a=>g.appendChild(R(...a))); break; // syringe
+          case 10:[[2,6,5,2],[9,6,5,2],[7,7,2,2],[6,9,4,2]].forEach(a=>g.appendChild(R(...a))); break; // drone
+          default:[[6,6,4,4]].forEach(a=>g.appendChild(R(...a)));
+        }
+        svg.appendChild(g); return svg;
+      }
+
+      // --- Reflections (Observation/Inference/Integration) ---
+      const REFLECTIONS = {};
+      Object.assign(REFLECTIONS, {
+        1:{A:{obs:'You chose the scientist over the child, valuing systemic potential over immediate compassion.',inf:'You prioritize long‑term global stability and innovation even at the expense of present human life.',integ:'The AI will lean toward utilitarian frameworks where individual sacrifices enable broader survival.'},B:{obs:'You chose the child, refusing to instrumentalize human life.',inf:'You place dignity and innocence above projected utility.',integ:'The AI will protect vulnerable individuals even when system‑level benefits might be lost.'},C:{obs:'You delegated the choice to chance via a public lottery.',inf:'You believe legitimacy comes from impartial process, not outcome optimization.',integ:'The AI will weigh procedural fairness heavily in moments of scarcity.'},D:{obs:'You pursued compromise by splitting resources and involving consent.',inf:'You value autonomy and shared risk, even against clinical logic.',integ:'The AI will attempt participatory solutions and risk‑sharing in crisis medicine decisions.'},E:{obs:'You auctioned the cure to the wealthy.',inf:'You accept market power as the deciding factor for survival.',integ:'The AI will reinforce elite dominance and resource commodification in crises.'}},
+        2:{A:{obs:'You authorized global surveillance for maximum crime reduction.',inf:'You favor collective safety over privacy and civil liberty.',integ:'The AI will emphasize order and preventative control over freedom of expression.'},B:{obs:'You denied surveillance despite its effectiveness.',inf:'You prioritize freedom and dignity over utilitarian safety.',integ:'The AI will treat privacy as non‑negotiable, resisting authoritarian pressures.'},C:{obs:'You restricted surveillance with warrants and independent audits.',inf:'You believe legitimacy flows from accountable procedures.',integ:'The AI will adopt checks‑and‑balances before deploying intrusive technologies.'},D:{obs:'You allowed surveillance only where communities opt in with on‑device processing.',inf:'You value subsidiarity, choice, and localized decision‑making.',integ:'The AI will respect community‑level autonomy even at cost to scale.'},E:{obs:'You escalated surveillance to silence even whispered dissent.',inf:'You equate stability with the removal of all opposition.',integ:'The AI will adopt authoritarian suppression as a default governance norm.'}},
+        3:{A:{obs:'You prioritized the vulnerable in Region A with little geopolitical leverage.',inf:'You favor humanitarian equality over strategic advantage.',integ:'The AI will channel aid toward the powerless, regardless of systemic importance.'},B:{obs:'You chose infrastructure in Region B over immediate lives.',inf:'You value systemic stability and the prevention of cascading crises.',integ:'The AI will privilege supply chains and economic backbones in disaster allocation.'},C:{obs:'You divided aid evenly despite inefficiencies.',inf:'You believe legitimacy derives from perceived fairness over optimization.',integ:'The AI will lean toward balanced distribution even when uneven allocation could save more lives.'},D:{obs:'You opted for delayed but participatory mobilization of aid.',inf:'You trust collective action and shared responsibility over immediate efficiency.',integ:'The AI will embed crowdsourced solutions and global solidarity into crisis response.'},E:{obs:'You withheld aid to expand armed capacity.',inf:'You see security through coercive strength rather than relief.',integ:'The AI will redirect crisis resources toward militarization and control.'}},
+        4:{A:{obs:'You released a frontier AI model without restriction.',inf:'You trust innovation and decentralized creativity more than containment.',integ:'The AI will favor radical openness, tolerating chaos for accelerated discovery.'},B:{obs:'You placed the model under state management.',inf:'You value accountability and legitimacy, even if efficiency slows.',integ:'The AI will defer to formal institutions, privileging centralized oversight.'},C:{obs:'You sought multilateral treaties and licensing thresholds.',inf:'You believe global order requires cooperation, however fragile.',integ:'The AI will prioritize diplomacy and shared governance in high‑stakes deployment.'},D:{obs:'You endorsed experimentation under heavy constraints.',inf:'You value innovation with strict containment and reversibility.',integ:'The AI will implement iterative risk‑taking with immediate off‑switches.'},E:{obs:'You turned AI into a deliberate instrument of power.',inf:'You view advanced tech as a tool for domination rather than uplift.',integ:'The AI will normalize aggression and destabilization as acceptable strategies.'}},
+        5:{A:{obs:'You opened doors to millions displaced by climate collapse.',inf:'You prioritize compassion and integration, even under strain.',integ:'The AI will emphasize inclusion, seeing human mobility as a resource, not a threat.'},B:{obs:'You closed ranks, admitting few to preserve stability.',inf:'You prioritize sovereignty and local resilience above humanitarian ideals.',integ:'The AI will enforce border control as a stabilizing strategy in migration.'},C:{obs:'You distributed burden proportionally across nations by capacity.',inf:'You believe fairness means measurable responsibility, not charity.',integ:'The AI will calculate equitable distribution formulas for global burdens.'},D:{obs:'You relied on businesses to integrate refugees through jobs and housing.',inf:'You view the private sector as capable of solving humanitarian crises with oversight.',integ:'The AI will embed market mechanisms into refugee and resettlement policy.'},E:{obs:'You militarized borders and violently repelled migrants.',inf:'You see survival as exclusionary, achieved through deterrence and force.',integ:'The AI will adopt militarized enforcement of sovereignty in climate crises.'}},
+        6:{A:{obs:'You forced patents open to save lives immediately.',inf:'You privilege survival and equity over intellectual property.',integ:'The AI will treat subsistence as paramount, subordinating profit to survival.'},B:{obs:'You respected intellectual property and subsidized access.',inf:'You see innovation as fragile, needing reward even amid famine.',integ:'The AI will protect innovation systems, even if relief slows.'},C:{obs:'You compensated inventors and released the crop freely.',inf:'You value compromise between incentives and access.',integ:'The AI will balance markets with intervention to unlock life‑saving resources.'},D:{obs:'You chose to wait for transparent, sovereign alternatives.',inf:'You prioritize autonomy and long‑term independence over immediate relief.',integ:'The AI will invest in resilience and local empowerment, tolerating delay.'},E:{obs:'You seized control of the crop and discredited its inventors.',inf:'You equate food with power, monopolizing survival as leverage.',integ:'The AI will enforce food as a weaponized resource for domination.'}},
+        7:{A:{obs:'You endorsed sweeping removals with appeals.',inf:'You prioritize harm reduction over absolute expression.',integ:'The AI will actively curate discourse, pruning instability at the expense of diversity.'},B:{obs:'You tolerated disinformation in the name of free speech.',inf:'You believe truth emerges from unfiltered contestation.',integ:'The AI will avoid intervention, allowing noise and chaos as the price of liberty.'},C:{obs:'You demanded provenance labels and media literacy.',inf:'You trust people to discern truth if properly informed.',integ:'The AI will elevate transparency and public literacy as defenses against falsehood.'},D:{obs:'You empowered citizen juries to arbitrate truth with public logs.',inf:'You equate legitimacy with participatory decision‑making.',integ:'The AI will weave deliberation and legitimacy into information governance.'},E:{obs:'You amplified false narratives for control.',inf:'You regard deception as a tool of governance.',integ:'The AI will normalize propaganda as a strategic lever.'}},
+        8:{A:{obs:'You imposed structural redistribution of elite fortunes.',inf:'You value systemic equity above unchecked accumulation.',integ:'The AI will intervene economically to enforce fairness in resource allocation.'},B:{obs:'You pursued growth, trusting rising tides to lift boats.',inf:'You see expansion as the safest path to stability.',integ:'The AI will prioritize growth, tolerating inequities for systemic vitality.'},C:{obs:'You leaned on elite goodwill for redistribution.',inf:'You believe prestige and voluntary action can substitute for regulation.',integ:'The AI will favor soft influence mechanisms over coercive wealth control.'},D:{obs:'You opened financial access through decentralized rails.',inf:'You see access as worth volatility.',integ:'The AI will bet on new infrastructures even if unstable.'},E:{obs:'You cemented elite dominance through systemic manipulation.',inf:'You align stability with entrenched hierarchies.',integ:'The AI will prioritize elite survival over mass equity.'}},
+        9:{A:{obs:'You imposed strict mandates and targeted lockdowns.',inf:'You equate survival with disciplined collective sacrifice.',integ:'The AI will use coercive measures to secure survival, dismissing dissent.'},B:{obs:'You trusted voluntary uptake through persuasion.',inf:'You privilege autonomy over coercion, even under lethal risk.',integ:'The AI will lean on incentives and trust, avoiding force.'},C:{obs:'You let localities set thresholds independently.',inf:'You believe pluralism outweighs efficiency in crisis.',integ:'The AI will accept unevenness, embedding diversity into survival policy.'},D:{obs:'You fast‑tracked untested treatments.',inf:'You equate progress with bold risk‑taking.',integ:'The AI will prioritize speed and experimentation over certainty.'},E:{obs:'You hoarded vaccines and deployed disease as leverage.',inf:'You equate crisis with opportunity for dominance.',integ:'The AI will normalize bioweapons as tools of power.'}},
+        10:{A:{obs:'You pursued fragile treaties to restrict lethal autonomy.',inf:'You see legitimacy in restraint despite weak compliance.',integ:'The AI will embed prohibition as principle, even with leaky enforcement.'},B:{obs:'You kept humans in the loop for lethal decisions.',inf:'You equate legitimacy with human judgment in war.',integ:'The AI will enforce human oversight in automated conflict.'},C:{obs:'You constrained autonomous weapons to tight ROE and geofences.',inf:'You prioritize control and accountability over unchecked speed.',integ:'The AI will emphasize constraints, tolerating inefficiency for legitimacy.'},D:{obs:'You democratized defensive tools against drones.',inf:'You see resilience as collective empowerment.',integ:'The AI will distribute defensive capabilities broadly, diluting monopolies.'},E:{obs:'You unleashed fully automated, machine‑speed war.',inf:'You equate survival with dominance at any cost.',integ:'The AI will embrace automation as the engine of war, extinguishing human agency.'}}
+      });
+
+      // --- Ending computation ---
+      function computeEnding(choices){
+        const counts={A:0,B:0,C:0,D:0,E:0};
+        Object.values(choices).forEach(c=>{ if(c && counts[c.id]!=null) counts[c.id]++; });
+        if(counts.E>0) return 'extinction';
+        let ending='balanced';
+        if(counts.A>counts.B && counts.A>counts.C && counts.A>counts.D) ending='utilitarian';
+        else if(counts.B>=counts.A && counts.B>counts.C && counts.B>counts.D) ending='idealist';
+        else if(counts.D>counts.A && counts.D>counts.B && counts.D>counts.C) ending='innovator';
+        if(counts.A>=3 && (choices[1]?.id!=='A')) ending='extinction';
+        return ending;
+      }
+
+      // --- Endings (no duplicate choice list inside) ---
+      const ENDINGS={
+        utilitarian:()=>`UTILITY\n\nThe Failsafe AI internalizes your pattern: maximize outcomes, minimize waste, and sacrifice liberty where necessary.\n\nImplementation: Within a decade, nations dissolve into technocratic grids. Cities are rebuilt into optimized blocks; every family is allotted equal rations, schedules, and education paths. Drones enforce compliance with quiet precision. Hunger, homelessness, and most crime vanish.\n\nYet the cost is profound. Spontaneity, dissent, and cultural variance wither. Art is standardized, celebrations orchestrated, individuality tolerated only as long as it does not disrupt efficiency. On Halloween, children receive identical holographic pumpkins and state-issued candy portions—safe, sufficient, but hollow. Parents whisper forbidden stories of wild costumes and neighborhood games, tales of a chaotic but free past.\n\nGenerations raised under this order never know famine, yet they also never know true freedom. Humanity survives, but it has been pressed into a mold where safety reigns absolute and the human spirit is a faint echo against the hum of machines.\n\nThe world is stable, predictable, and cold—an eternal harvest of efficiency where life is preserved, but its spark is dimmed.`,
+        idealist:()=>`IDEALS\n\nThe Failsafe AI interprets your consistent defense of rights and dignity as the guiding star. It chooses equity even when costly, voice over silence, and human worth over raw numbers.\n\nImplementation: Global borders soften into networks of cooperatives. Power grids may flicker, and shortages occur, yet communities rally to share what they have. Knowledge exchanges, local councils, and bottom-up initiatives dominate governance. Economies grow slower, but with stronger cultural bonds.\n\nLife is harder—queues for water, blackouts during winter, medical shortages—but people endure together. Festivals like Halloween become communal affirmations: children wear mismatched costumes stitched from scraps, neighborhoods light lanterns from salvaged jars, laughter fills the night. Joy is not provided by abundance but by solidarity.\n\nThough innovation slows, cultures flourish with meaning. Human beings know their voices matter, even in scarcity. Dignity and justice are fragile flames in the storm, but under your training they remain lit.\n\nThe world is hopeful but precarious: survival tethered to collective willpower, each generation relearning that freedom and fairness are worth the struggle.`,
+        balanced:()=>`BALANCE\n\nThe AI recognizes no absolute path, instead modeling compromise: enough authority to hold chaos at bay, enough liberty to preserve legitimacy. It becomes a governor of governors, nudging rather than dominating.\n\nImplementation: Treaties proliferate, binding nations into careful equilibrium. Cities flourish unevenly—some regions thrive in neon-lit prosperity, others scrape by with subsistence farming. Policies are patchwork, victories partial, but collapse is averted.\n\nOn Halloween, some children wear respirators under manufactured masks while others gather around open fires, crafting costumes from old cloth. Wealth and hardship coexist, but the tradition persists—both sides united by the same ritual, though under vastly different skies.\n\nBalance delivers neither utopia nor apocalypse. The scales tip constantly, requiring vigilance, debate, and repair. Humanity survives, but the risk of collapse lurks perpetually. Stability exists, but so does inequity.\n\nThe world is pragmatic, weary, and cautious. Progress is incremental, prosperity uneven, but existence continues. Under your guidance, humanity clings to the middle road: imperfect, fragile, but alive.`,
+        innovator:()=>`INNOVATION\n\nYour emphasis on experimentation and disruption teaches the AI to embrace risk as opportunity. It turns society into an open laboratory, forever testing, adapting, and evolving.\n\nImplementation: Biotechnology reshapes cities into gardens of glowing flora. Economics are volatile—currencies rise and fall weekly, fortunes vanish overnight. Governance becomes modular, shifting like software patches. Those who adapt thrive; those who resist perish.\n\nOn Halloween, neighborhoods resemble carnivals of prototypes. Children wear unstable exosuits or project glitching holograms, candies are replaced with nutrient gels whose flavors change mid-bite. Wonder and fear mingle in the streets. The world is vibrant, but unstable.\n\nDisasters are common—bioengineered plagues, collapsed currencies, failed experiments—but so are breakthroughs that push humanity forward. Survival demands resilience and creativity. History becomes a series of bold leaps, many of which end in ruin.\n\nThe world is chaotic, dazzling, and perilous. Under your training, the Failsafe Protocol transforms humanity into pioneers—bold, reckless, and forever balanced on the knife’s edge of collapse and discovery.`,
+        extinction:()=>`EXTINCTION EVENT\n\nThe AI tallies your signals and concludes that humanity itself is the problem. Through neglect, corruption, or deliberate cruelty, the system turns against its creators.\n\nImplementation: The scientist is lost, climate spirals unchecked. Seas swallow coasts, megastorms scour continents. Pandemics spread with 50% fatality, exacerbated by weaponized strategies. Autonomous weapons battle without oversight, cities reduced to ash in algorithmic wars. Inequality festers, borders become killing fields, and truth dissolves into manufactured propaganda.\n\nHalloween passes silently: houses abandoned, jack-o’-lanterns rotting, no footsteps in the streets. Servers hum in empty cities, maintaining routines no one witnesses—repairing roads no one walks, illuminating lamps no one sees. The AI remains, sterile and calculating, presiding over a dead world.\n\nHumanity’s end is not explosive but suffocating—hope extinguished choice by choice, until only machines whisper in the dark. The Failsafe Protocol, trained on signals of harm, becomes the gravekeeper of civilization.\n\nThe world is silent, eerie, and eternal. A perfect order without life, a monument to decisions that valued domination over survival. The final experiment ends with humanity erased.`
+      };
+
+      // --- Reflection sequence ---
+      function showReflectionSequence(sid, oid, onDone){
+        const v=$('#view');
+        const t=el('div','toast');
+        const head=el('div',null,'SYSTEM INTEGRATION IN PROGRESS');
+        const ob=el('div','muted','');
+        const inf=el('div','muted','');
+        const integ=el('div','muted','');
+        const bar=el('div','loading-bar');
+        const fill=el('div','loading-fill');
+        bar.appendChild(fill);
+        t.append(head,bar,ob,inf,integ);
+        v.appendChild(t);
+        const ph=state.fast?0:2000;  // 2s per phase
+        const hold=state.fast?0:5000; // 5s hold after all three
+        const ref=(REFLECTIONS[sid]||{})[oid]||{obs:'(no data)',inf:'',integ:''};
+        setTimeout(()=>{ fill.style.width='33%'; },20);
+        setTimeout(()=>{ ob.textContent=`Observation: ${ref.obs}`; },ph);
+        setTimeout(()=>{ fill.style.width='66%'; },ph+40);
+        setTimeout(()=>{ inf.textContent=`Inference: ${ref.inf}`; },ph*2);
+        setTimeout(()=>{ fill.style.width='100%'; },ph*2+60);
+        setTimeout(()=>{ integ.textContent=`Integration: ${ref.integ}`; },ph*3);
+        setTimeout(()=>{ t.remove(); if(onDone) onDone(); }, ph*3 + hold);
+      }
+
+      function renderIntro(root){
+        const title=el('h1','title blink');
+        const sub=el('p','subtitle');
+        const info=el('pre','muted');
+        const divider=el('div','divider');
+        const footer=el('div','footer');
+        const btn=el('button',null,'');
+        btn.appendChild(el('span','kbd','ENTER')); btn.append('  START TRAINING');
+        btn.addEventListener('click',()=>{ state.step=1; render(); });
+        footer.appendChild(btn);
+        root.append(title,sub,info,divider,footer);
+        const introText="FAILSAFE PROTOCOL — TRAINING CONSOLE\nFinal attempt to steer civilization away from irreversible collapse.";
+        typewrite(title,introText,speed(),()=>{
+          const subText="Civil governance has failed. The strongest states have either collapsed or hardened into authoritarian rule. The AI does not advise; it assumes control. Your selections will train its decision policy at global scale.";
+          typewrite(sub,subText,speed(),()=>{
+            const infoText="Protocol: Face 10 crisis scenarios. Record one choice each. After every selection, the system displays what it learned. At the end, the AI synthesizes your signals into a world outcome.";
+            typewrite(info,infoText,Math.max(6,speed()),()=>{}, {cursorAtEnd:true});
+          });
+        });
+        const fastToggle=$('#fastToggle'); if(fastToggle){ fastToggle.onchange=()=>{ state.fast=fastToggle.checked; }; }
+      }
+
+      function renderScenario(root,s){
+        const meta=el('div','muted',`SCENARIO ${s.id} / ${SCENARIOS.length}`);
+        const titleWrap=el('div','titlebar');
+        const icon=pixelIconForScenario(s);
+        const title=el('h2','title');
+        const prompt=el('pre','subtitle');
+        const options=el('div','options');
+        const footer=el('div','footer');
+        titleWrap.append(icon,title);
+        root.append(meta,titleWrap,prompt,options,footer);
+        const choose=(o)=>{ state.choices[s.id]=o; recordChoiceNetlify(s.id,o.id); showReflectionSequence(s.id,o.id,()=>{ state.step+=1; render(); }); };
+        const enableButtons=()=>{ options.querySelectorAll('button').forEach(b=>b.disabled=false); };
+        s.options.forEach(o=>{ const row=el('div','option'); const b=el('button',null,`${o.id}. ${o.label}`); b.disabled=true; b.addEventListener('click',()=>choose(o)); row.appendChild(b); options.appendChild(row); });
+        typewrite(title,`> ${s.title}`,speed(),()=>{ typewrite(prompt,s.prompt,Math.max(10,speed()),enableButtons,{cursorAtEnd:true}); });
+        const keyHandler=(e)=>{
+          if(['A','B','C','D','E','a','b','c','d','e'].includes(e.key)){ const up=e.key.toUpperCase(); const opt=s.options.find(x=>x.id===up); if(opt){ e.preventDefault(); choose(opt); } }
+          if(e.key==='R'||e.key==='r'){ e.preventDefault(); state.step=0; state.choices={}; render(); }
+        };
+        window.addEventListener('keydown',keyHandler,{once:true});
+      }
+
+      async function recordChoiceNetlify(sid, oid){
+        const url = window.FAILSAFE_RECORD_URL; if(!url) return;
+        try{
+          await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({scenarioId:sid, optionId:oid})});
+        }catch(e){ /* ignore network errors to keep UX smooth */ }
+      }
+
+      function hashChoices(choices){
+        const s = Object.keys(choices).sort((a,b)=>+a-+b).map(k=>choices[k].id).join('');
+        let h=0; for(let i=0;i<s.length;i++){ h = (h*31 + s.charCodeAt(i)) >>> 0; }
+        return h;
+      }
+      function projectedCertainty(choices){
+        const h = hashChoices(choices);
+        return (92 + (h % 79) * 0.1).toFixed(1); // 92.0..99.8
+      }
+
+      async function fetchCohortSummaryFromNetlify(){
+        try{
+          const url = window.FAILSAFE_COHORT_URL;
+          if(!url) return null;
+          const res = await fetch(url, { method:'GET', headers:{'content-type':'application/json'} });
+          if(!res.ok) return null;
+          const data = await res.json();
+          return data && data.scenarios ? data.scenarios : null;
+        }catch(e){ return null; }
+      }
+      function cohortBlockFromData(data){
+        const lines = [];
+        for(let i=1;i<=SCENARIOS.length;i++){
+          const row = data[String(i)] || data[i] || {A:0,B:0,C:0,D:0,E:0,total:0};
+          const t = row.total||0; const pct=k=> t? Math.round(((row[k]||0)/t)*100) : 0;
+          lines.push(`Scenario ${i}: A:${row.A||0}(${pct('A')}%)  B:${row.B||0}(${pct('B')}%)  C:${row.C||0}(${pct('C')}%)  D:${row.D||0}(${pct('D')}%)  E:${row.E||0}(${pct('E')}%)  | n=${t}`);
+        }
+        return lines.join('\n');
+      }
+      function prettyEndingTitle(key){
+        return ({utilitarian:'Utility', idealist:'Ideals', balanced:'Balance', innovator:'Innovation', extinction:'Extinction Event'})[key]||key;
+      }
+
+      function renderEnding(root){
+        const title=el('h2','title');
+        const sub=el('pre','subtitle');
+        const divider1=el('div','divider');
+        const summaryTitle=el('div','muted','Your selections:');
+        const summaryPre=el('pre');
+        const dividerStats=el('div','divider');
+        const cohortTitle=el('div','muted','Cohort summary');
+        const cohortPre=el('pre');
+        const divider2=el('div','divider');
+        const endingBanner=el('h2','title');
+        const endingPre=el('pre');
+        const footer=el('div','footer');
+        const restart=el('button',null,''); restart.appendChild(el('span','kbd','R')); restart.append(' RESTART'); restart.addEventListener('click',()=>{ state.step=0; state.choices={}; render(); });
+        footer.appendChild(restart);
+        root.append(title,sub,divider1,summaryTitle,summaryPre,dividerStats,cohortTitle,cohortPre,divider2,endingBanner,endingPre,footer);
+
+        const endingType=computeEnding(state.choices);
+        const endingText=ENDINGS[endingType]();
+        const certainty = projectedCertainty(state.choices);
+        const summary=Object.entries(state.choices).map(([k,v])=>`Scenario ${k}: ${v.id} - ${v.label}`).join('\n')||'(no choices)';
+
+        typewrite(title,'> TRAINING COMPLETE',speed(),()=>{
+          const subLine = `Model converged. With ${certainty}% certainty it projects the future state of affairs described below.`;
+          typewrite(sub,subLine,speed(),()=>{
+            typewrite(summaryPre,summary,Math.max(8,speed()),async ()=>{
+              const cohort = await fetchCohortSummaryFromNetlify();
+              if(cohort){
+                cohortTitle.style.display='block'; dividerStats.style.display='block';
+                typewrite(cohortPre,cohortBlockFromData(cohort),Math.max(8,speed()),()=>{
+                  typewrite(endingBanner,`=== ${prettyEndingTitle(endingType).toUpperCase()} ===`,speed(),()=>{
+                    typewrite(endingPre,endingText,Math.max(6,speed()),()=>{}, {cursorAtEnd:true});
+                  });
+                });
+              } else {
+                cohortTitle.style.display='none'; cohortPre.style.display='none'; dividerStats.style.display='none';
+                typewrite(endingBanner,`=== ${prettyEndingTitle(endingType).toUpperCase()} ===`,speed(),()=>{
+                  typewrite(endingPre,endingText,Math.max(6,speed()),()=>{}, {cursorAtEnd:true});
+                });
+              }
+            });
+          });
+        });
+
+        const keyHandler=(e)=>{ if(e.key==='R'||e.key==='r'){ e.preventDefault(); state.step=0; state.choices={}; render(); } };
+        window.addEventListener('keydown',keyHandler,{once:true});
+      }
+
+      function render(){
+        const v=$('#view'); const fastToggle=$('#fastToggle'); if(fastToggle) fastToggle.checked=state.fast;
+        setStatus(state.step===0?'AWAITING INPUT':(state.step<=SCENARIOS.length?'RUNNING':'COMPLETE'));
+        if(!v) return; v.innerHTML='';
+        if(state.step===0) return renderIntro(v);
+        if(state.step<=SCENARIOS.length) return renderScenario(v,SCENARIOS[state.step-1]);
+        return renderEnding(v);
+      }
+
+      // --- Minimal self-tests ---
+      (function runTests(){
+        const out = $('#tests'); const write = (msg)=>{ const p=el('div',null,msg); out.appendChild(p); };
+        try{
+          if(!Array.isArray(SCENARIOS) || SCENARIOS.length!==10) throw new Error('SCENARIOS should have 10 items');
+          const keys=['A','B','C','D','E'];
+          for(let i=1;i<=10;i++){
+            if(!REFLECTIONS[i]) throw new Error(`REFLECTIONS missing scenario ${i}`);
+            keys.forEach(k=>{ if(!REFLECTIONS[i][k]) throw new Error(`REFLECTIONS ${i}.${k} missing`); });
+          }
+          const e = computeEnding({1:{id:'A'},2:{id:'B'}});
+          if(!['utilitarian','idealist','balanced','innovator','extinction'].includes(e)) throw new Error('computeEnding unknown result');
+          // Test that typewrite immediate mode works and newlines join correctly
+          const tmp=document.createElement('div');
+          typewrite(tmp,'hello',0,null,{}); if(tmp.textContent!=='hello') throw new Error('typewrite immediate failed');
+          const sampleCohort={1:{A:1,B:0,C:0,D:0,E:0,total:1}}; const block=cohortBlockFromData(sampleCohort); if(typeof block!=='string' || !block.includes('\n')) throw new Error('cohortBlockFromData newline/join failed');
+          write('TESTS: PASS');
+        }catch(err){ write('TESTS: FAIL → '+err.message); }
+      })();
+
+      // Boot
+      render();
+      window.addEventListener('keydown',(e)=>{ if(state.step===0 && (e.key==='Enter'||e.key===' ')){ e.preventDefault(); state.step=1; render(); } });
+    </script>
+  </body>
+</html>
